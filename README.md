@@ -40,6 +40,7 @@ Add `client_payload[domain]` and `client_payload[port]` flags if you want to ove
 
 - Service repo: secret `DEPLOY_ORCHESTRATOR_TOKEN` (GitHub token with `repo` scope). Optional repo variables `DOMAIN` and `PORT` for custom values.
 - Orchestrator repo: secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, and `CERT_EMAIL`; optional `SERVICE_ENVS_JSON` and `PUSH_DEPLOY_SERVICES`.
+- Sample values: see `docs/secrets.sample.env` for required/optional secrets in both the orchestrator and service repos.
 
 ### 3. Push to Deploy
 
@@ -177,10 +178,10 @@ The orchestrator workflow triggers on:
 
 ### Push Behavior Control
 
-Set `PUSH_DEPLOY_SERVICES` secret to control push deployments:
-- Unset or `all`: Deploy all services
-- `none`, `skip`, `false`, `0`: Skip service deployment
-- `service-a, service-b`: Deploy only listed services
+Set `PUSH_DEPLOY_SERVICES` secret to control push deployments when a commit is pushed to main IN THIS REPO:
+- Unset or `all`: Deploy all services (NOT recommended)
+- `none`, `skip`, `false`, `0`: Skip service deployment (Recommended)
+- `service-a, service-b`: Deploy only listed services (NOT recommended)
 
 ## Manual Operations
 
