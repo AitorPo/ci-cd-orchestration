@@ -1,0 +1,15 @@
+name: __REPO_NAME__
+domain: __DOMAIN__
+upstream_host: __UPSTREAM_HOST__
+upstream_port: __PORT__
+working_dir: __WORKING_DIR__
+user: __USER__
+start_cmd: docker compose -f __WORKING_DIR__/compose.yml up -d --remove-orphans
+stop_cmd: docker compose -f __WORKING_DIR__/compose.yml down
+migrate_cmd: __MIGRATE_CMD__
+health_path: __HEALTH_PATH__
+static_root: __STATIC_ROOT__
+repo_url: __REPO_URL__
+repo_ref: __REPO_REF__
+compose_file: __WORKING_DIR__/compose.yml
+build_cmd: docker compose -f __WORKING_DIR__/compose.yml build

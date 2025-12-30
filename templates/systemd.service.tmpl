@@ -1,0 +1,18 @@
+[Unit]
+Description=__NAME__ service
+After=network.target
+
+[Service]
+Type=__TYPE__
+RemainAfterExit=__REMAIN_AFTER_EXIT__
+WorkingDirectory=__WORKING_DIR__
+ExecStart=__START_CMD__
+ExecStop=__STOP_CMD__
+Restart=__RESTART__
+RestartSec=3
+User=__USER__
+
+# Optional migrations are handled by deploy.py before restart.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,429 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - "templates/**"
+      - "scripts/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Optional service name to deploy (matches services/*.yml name)"
+        required: false
+  repository_dispatch:
+    types: [service-deploy]
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-${{ github.ref }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyyaml
+
+      - name: Generate service config from template (repository_dispatch)
+        if: github.event_name == 'repository_dispatch'
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+
+          import yaml
+          
+          payload = json.loads(os.environ["PAYLOAD"])
+          service = payload.get("service")
+          
+          if not service:
+              print("ERROR: 'service' field is required in payload", file=sys.stderr)
+              sys.exit(1)
+          
+          def normalize_locations(raw):
+              if raw in (None, "", []):
+                  return []
+              if isinstance(raw, str):
+                  try:
+                      raw = json.loads(raw)
+                  except json.JSONDecodeError as exc:
+                      print(f"Invalid locations (expected JSON/YAML list). Decode error: {exc}", file=sys.stderr)
+                      sys.exit(1)
+              if not isinstance(raw, list):
+                  print("Invalid locations: expected a list of mappings", file=sys.stderr)
+                  sys.exit(1)
+              normalized = []
+              for idx, entry in enumerate(raw, 1):
+                  if not isinstance(entry, dict):
+                      print(f"Invalid locations[{idx}] (expected object)", file=sys.stderr)
+                      sys.exit(1)
+                  path = entry.get("path")
+                  if not path:
+                      print(f"Invalid locations[{idx}] (missing path)", file=sys.stderr)
+                      sys.exit(1)
+                  normalized.append(entry)
+              return normalized
+
+          locations = normalize_locations(payload.get("locations"))
+
+          # Required fields with defaults
+          domain = payload.get("domain", f"{service}.example.com")
+          port = payload.get("port", "3000")
+          
+          # Optional fields with defaults from template
+          repo_url = payload.get("repo_url", f"git@github.com:AitorPo/{service}.git")
+          repo_ref = payload.get("repo_ref", "main")
+          working_dir = payload.get("working_dir", f"/opt/{service}")
+          user = payload.get("user", "root")
+          upstream_host = payload.get("upstream_host", "127.0.0.1")
+          health_path = payload.get("health_path", "/healthz")
+          static_root = payload.get("static_root", "")
+          migrate_cmd = payload.get("migrate_cmd", "")
+          
+          # Read template
+          template_path = Path("service.yml")
+          if not template_path.exists():
+              print(f"ERROR: Template file {template_path} not found", file=sys.stderr)
+              sys.exit(1)
+          
+          template = template_path.read_text(encoding="utf-8")
+          
+          # Replace placeholders
+          replacements = {
+              "__REPO_NAME__": service,
+              "__DOMAIN__": domain,
+              "__PORT__": str(port),
+              "__REPO_URL__": repo_url,
+              "__REPO_REF__": repo_ref,
+              "__WORKING_DIR__": working_dir,
+              "__USER__": user,
+              "__UPSTREAM_HOST__": upstream_host,
+              "__HEALTH_PATH__": health_path,
+              "__STATIC_ROOT__": static_root,
+              "__MIGRATE_CMD__": migrate_cmd,
+          }
+          
+          config = template
+          for placeholder, value in replacements.items():
+              config = config.replace(placeholder, value)
+
+          if locations:
+              locations_block = yaml.safe_dump({"locations": locations}, sort_keys=False)
+              if not config.endswith("\n"):
+                  config += "\n"
+              config += "\n" + locations_block
+          
+          # Validate no placeholders remain
+          if "__" in config and "______" not in config:
+              print("ERROR: Template still contains unreplaced placeholders:", file=sys.stderr)
+              for line in config.splitlines():
+                  if "__" in line and "______" not in line:
+                      print(f"  {line}", file=sys.stderr)
+              sys.exit(1)
+          
+          # Write to services directory (runtime only, gitignored)
+          services_dir = Path("services")
+          services_dir.mkdir(exist_ok=True)
+          output_path = services_dir / f"{service}.yml"
+          
+          # We need to write the file since one_click.py and sync_and_deploy.py expect it to be there.
+          output_path.write_text(config, encoding="utf-8")
+          
+          print(f"✓ Generated {output_path} from template for service: {service}")
+          print(f"  Domain: {domain}")
+          print(f"  Port: {port}")
+          print(f"  Repo: {repo_url}@{repo_ref}")
+          PY
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_KEY:-}" ]; then
+            echo "Secret DEPLOY_SSH_KEY is required" >&2
+            exit 1
+          fi
+          if [ -z "${HOST:-}" ]; then
+            echo "Secret DEPLOY_HOST is required" >&2
+            exit 1
+          fi
+          HOST_ONLY="${HOST#*@}"
+          install -m 700 -d ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$HOST_ONLY" >> ~/.ssh/known_hosts
+
+      - name: Push service env vars as systemd drop-ins (optional)
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          SERVICE_ENVS_JSON: ${{ secrets.SERVICE_ENVS_JSON }}
+          ALL_SECRETS_JSON: ${{ toJson(secrets) }}
+          SERVICE: ${{ github.event.inputs.service || github.event.client_payload.service }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SERVICE_ENVS_JSON:-}" ] && [ -z "${ALL_SECRETS_JSON:-}" ]; then
+            echo "No SERVICE_ENVS_JSON provided; will fall back to repository secrets."
+          fi
+          python - <<'PY'
+          import json, os, shlex, subprocess
+          from pathlib import Path
+
+          host = os.environ["HOST"]
+          raw = os.environ.get("SERVICE_ENVS_JSON", "") or ""
+          secrets_raw = os.environ.get("ALL_SECRETS_JSON", "") or ""
+          target_service = os.environ.get("SERVICE") or ""
+          all_services = {p.stem for p in Path("services").glob("*.yml")}
+          services = set(all_services)
+          if target_service:
+              services &= {target_service}
+              if not services:
+                  print(f"Service {target_service!r} not found in services/*.yml; skipping env push.")
+                  raise SystemExit(0)
+          if not services:
+              print("No services/*.yml found; skipping env push.")
+              raise SystemExit(0)
+
+          def parse_loose(text: str) -> dict:
+              # YAML-ish fallback: service blocks like:
+              # service-name:
+              #   KEY=VALUE
+              #   OTHER=VALUE
+              result = {}
+              current = None
+              buffer = []
+              def flush():
+                  if current and buffer:
+                      result[current] = "\n".join(buffer)
+              for line in text.splitlines():
+                  stripped = line.strip()
+                  if not stripped or stripped.startswith("#"):
+                      continue
+                  if stripped.endswith(":") and "=" not in stripped.split(":", 1)[0]:
+                      flush()
+                      current = stripped[:-1].strip()
+                      buffer = []
+                  else:
+                      buffer.append(stripped)
+              flush()
+              return result
+
+          def normalize_payload(raw_text: str) -> dict:
+              try:
+                  payload = json.loads(raw_text)
+                  if not isinstance(payload, dict):
+                      raise SystemExit("SERVICE_ENVS_JSON must be an object mapping service -> env content")
+                  return payload
+              except json.JSONDecodeError:
+                  fallback = parse_loose(raw_text)
+                  if not fallback:
+                      example = '{"neobrutalist-portfolio":"NEXT_PUBLIC_API=https://api.example.com\\\\nNODE_ENV=production"}'
+                      raise SystemExit(
+                          "Invalid SERVICE_ENVS_JSON. Provide valid JSON or YAML-ish blocks (service:\\n  KEY=VAL). "
+                          f"JSON example: {example}"
+                      )
+                  return fallback
+
+          def build_env_from_secrets(raw_text: str, svc_names: set[str]) -> dict:
+              try:
+                  payload = json.loads(raw_text) or {}
+              except json.JSONDecodeError as exc:
+                  raise SystemExit(f"Invalid ALL_SECRETS_JSON: {exc}")
+              if not isinstance(payload, dict):
+                  raise SystemExit("ALL_SECRETS_JSON must be a JSON object mapping secret -> value")
+
+              env_lines = []
+              for key, val in payload.items():
+                  if val is None:
+                      continue
+                  val_str = str(val)
+                  if not val_str:
+                      continue
+                  val_str = val_str.replace("\n", "\\n")
+                  env_lines.append(f"{key}={val_str}")
+
+              joined = "\n".join(env_lines)
+              if not joined:
+                  return {}
+              return {name: joined for name in svc_names}
+
+          def write_dropin(name: str, content) -> bool:
+              drop_dir = f"/etc/systemd/system/{name}.service.d"
+              drop_file = f"{drop_dir}/env.conf"
+              lines = ["[Service]"]
+              content_lines = content if isinstance(content, list) else str(content).splitlines()
+              for raw_line in content_lines:
+                  line = raw_line.strip()
+                  if not line or line.startswith("#") or "=" not in line:
+                      continue
+                  key, val = line.split("=", 1)
+                  key = key.strip()
+                  val = val.strip().replace('"', '\\"')
+                  if not key:
+                      continue
+                  lines.append(f'Environment="{key}={val}"')
+
+              if len(lines) == 1:
+                  return False
+
+              conf = "\n".join(lines) + "\n"
+              subprocess.run(["ssh", host, f"sudo mkdir -p {shlex.quote(drop_dir)}"], check=True)
+              subprocess.run(
+                  ["ssh", host, f"cat | sudo tee {shlex.quote(drop_file)} >/dev/null"],
+                  input=conf,
+                  text=True,
+                  check=True,
+              )
+              print(f"Wrote drop-in env for {name} to {drop_file}")
+              return True
+
+          if raw.strip():
+              payload = normalize_payload(raw)
+              if not payload:
+                  print("SERVICE_ENVS_JSON resolved to an empty payload; skipping env push.")
+                  raise SystemExit(0)
+          elif secrets_raw.strip():
+              payload = build_env_from_secrets(secrets_raw, services)
+              if not payload:
+                  print("No usable secrets found; skipping env push.")
+                  raise SystemExit(0)
+          else:
+              print("No SERVICE_ENVS_JSON or ALL_SECRETS_JSON available; skipping env push.")
+              raise SystemExit(0)
+
+          wrote_any = False
+          for name, content in payload.items():
+              if name not in services:
+                  print(f"Skipping env for {name!r}: service not found in services/*.yml")
+                  continue
+              wrote_any |= write_dropin(name, content)
+
+          if wrote_any:
+              subprocess.run(["ssh", host, "sudo systemctl daemon-reload"], check=True)
+          else:
+              print("No env drop-ins written.")
+          PY
+
+      - name: Deploy configs and services
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          CERT_EMAIL: ${{ secrets.CERT_EMAIL }}
+          SERVICE: ${{ github.event.inputs.service || github.event.client_payload.service }}
+          PUSH_DEPLOY_SERVICES: ${{ secrets.PUSH_DEPLOY_SERVICES }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_EMAIL:-}" ]; then
+            echo "Secret CERT_EMAIL is required" >&2
+            exit 1
+          fi
+          if [ -n "${SERVICE:-}" ]; then
+            python scripts/one_click.py "$HOST" "$CERT_EMAIL" --service "$SERVICE"
+            python scripts/sync_and_deploy.py "$HOST" --service "$SERVICE"
+            exit 0
+          fi
+          python scripts/one_click.py "$HOST" "$CERT_EMAIL"
+
+          # On push, allow restricting/disable auto-deploy via secret.
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            mode="${PUSH_DEPLOY_SERVICES:-all}"
+            case "${mode}" in
+              ""|none|skip|false|0)
+                echo "Auto service deploy on push disabled."
+                exit 0
+                ;;
+              all|true|1)
+                python scripts/sync_and_deploy.py "$HOST"
+                exit 0
+                ;;
+            esac
+
+            # Treat secret as comma/space separated list of service names.
+            IFS=', ' read -r -a svc_arr <<< "${mode}"
+            args=()
+            for svc in "${svc_arr[@]}"; do
+              [ -z "${svc}" ] && continue
+              args+=(--service "${svc}")
+            done
+            if [ "${#args[@]}" -eq 0 ]; then
+              echo "No valid services in PUSH_DEPLOY_SERVICES; skipping."
+              exit 0
+            fi
+            python scripts/sync_and_deploy.py "$HOST" "${args[@]}"
+            exit 0
+          fi
+
+          # For manual/repo dispatch without a service, deploy all.
+          python scripts/sync_and_deploy.py "$HOST"
+
+      - name: Cleanup on failure (stop/remove services)
+        if: failure()
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          SERVICE: ${{ github.event.inputs.service || github.event.client_payload.service }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, shlex, subprocess
+          from pathlib import Path
+
+          host = os.environ["HOST"]
+          selected = os.environ.get("SERVICE")
+
+          def parse_service(path: Path):
+              data = {}
+              for raw in path.read_text(encoding="utf-8").splitlines():
+                  line = raw.strip()
+                  if not line or line.startswith("#") or ":" not in line:
+                      continue
+                  key, val = line.split(":", 1)
+                  data[key.strip()] = val.strip()
+              name = data.get("name")
+              compose_file = data.get("compose_file")
+              return name, compose_file
+
+          services = []
+          for svc_file in Path("services").glob("*.yml"):
+              name, compose_file = parse_service(svc_file)
+              if not name:
+                  continue
+              if selected and name != selected:
+                  continue
+              services.append((name, compose_file))
+
+          if not services:
+              raise SystemExit("No services found to clean up.")
+
+          lines = ["set -euo pipefail"]
+          for name, compose_file in services:
+              lines.append(f'echo "Cleaning up {name} ..."')
+              lines.append(f"sudo systemctl disable --now {shlex.quote(name)} || true")
+              lines.append(f"sudo rm -f /etc/systemd/system/{shlex.quote(name)}.service")
+              if compose_file:
+                  cf = shlex.quote(compose_file)
+                  lines.append(f"[ -f {cf} ] && sudo docker compose -f {cf} down || true")
+              lines.append(f"sudo rm -f /etc/nginx/sites-enabled/{shlex.quote(name)}.conf")
+
+          lines.append("sudo systemctl daemon-reload || true")
+          lines.append("sudo nginx -t && sudo systemctl reload nginx || true")
+
+          cleanup_script = "\n".join(lines)
+          subprocess.run(["ssh", host, "bash", "-s"], input=cleanup_script, text=True, check=False)
+          PY
