@@ -90,7 +90,7 @@ def main():
 
     domains = parse_domains(args.service)
     domains_str = " ".join(domains)
-    tmp_remote = "/tmp/deploy-orchestrator"
+    tmp_remote = "/tmp/ci-cd-orchestration"
 
     print(f"[local] Preparing remote temp dir on {ssh_host} ...")
     remote_tmp = shlex.quote(tmp_remote)

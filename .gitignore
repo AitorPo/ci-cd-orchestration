@@ -1,2 +1,5 @@
 generated/
 services/*.yml
+
+__pycache__/
+*.pyc

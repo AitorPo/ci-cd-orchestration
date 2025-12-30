@@ -27,7 +27,7 @@ jobs:
     steps:
       - name: Trigger deployment
         run: |
-          gh api repos/AitorPo/deploy-orchestrator/dispatches \
+          gh api repos/AitorPo/ci-cd-orchestration/dispatches \
             -f event_type=service-deploy \
             -f client_payload[service]=${{ github.event.repository.name }}
         env:
@@ -70,7 +70,7 @@ Service live at https://my-app.example.com
 ## Repository Structure
 
 ```
-deploy-orchestrator/
+ci-cd-orchestration/
 ├── .github/workflows/deploy.yml   # GitHub Actions deploy workflow
 ├── README.md
 ├── service.yml                    # Template with placeholders
@@ -187,7 +187,7 @@ Set `PUSH_DEPLOY_SERVICES` secret to control push deployments:
 ### Trigger Deployment via CLI
 
 ```bash
-gh api repos/AitorPo/deploy-orchestrator/dispatches \
+gh api repos/AitorPo/ci-cd-orchestration/dispatches \
   -f event_type=service-deploy \
   -f client_payload[service]=my-app \
   -f client_payload[domain]=my-app.example.com \

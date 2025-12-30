@@ -3,7 +3,7 @@
 ## Trigger Deployment
 
 ```bash
-gh api repos/AitorPo/deploy-orchestrator/dispatches \
+gh api repos/AitorPo/ci-cd-orchestration/dispatches \
   -f event_type=service-deploy \
   -f client_payload[service]=my-service \
   -f client_payload[domain]=my-service.example.com \
@@ -106,7 +106,7 @@ Pass an array of location objects (JSON string is fine) to render extra nginx `l
 ```yaml
 - name: Trigger deployment
   run: |
-    gh api repos/AitorPo/deploy-orchestrator/dispatches \
+    gh api repos/AitorPo/ci-cd-orchestration/dispatches \
       -f event_type=service-deploy \
       -f client_payload[service]=${{ github.event.repository.name }} \
       -f client_payload[domain]=${{ vars.DOMAIN }} \
